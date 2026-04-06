@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../lib/supabaseClient'
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip,
-  ResponsiveContainer, PieChart, Pie, Cell, BarChart, Bar
+  ResponsiveContainer, PieChart, Pie, Cell
 } from 'recharts'
 
 const categoryColors = {
@@ -15,16 +15,16 @@ const CATEGORIES = ['Alimentação', 'Moradia', 'Transporte', 'Saúde', 'Lazer',
 const formatCurrency = v =>
   Number(v).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
 
+const formatCurrencyShort = v => {
+  const n = Number(v)
+  if (Math.abs(n) >= 1000) return `R$${(n / 1000).toFixed(1)}k`
+  return `R$${n.toFixed(0)}`
+}
+
 const formatDateLabel = (dateStr) => {
   const [year, month, day] = dateStr.split('-')
   const d = new Date(Number(year), Number(month) - 1, Number(day))
   return d.toLocaleDateString('pt-BR', { weekday: 'long', day: '2-digit', month: 'long' })
-}
-
-const formatMonthLabel = (dateStr) => {
-  const [year, month] = dateStr.split('-')
-  const d = new Date(Number(year), Number(month) - 1, 1)
-  return d.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' })
 }
 
 const CustomTooltip = ({ active, payload, label }) => {
@@ -50,6 +50,8 @@ const inp = {
 
 const EMPTY_FORM = { desc: '', category: 'Alimentação', value: '', type: 'expense', date: '' }
 const EMPTY_GOAL = { name: '', target: '', current: '' }
+const WEEK_DAYS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb']
+const MONTH_NAMES = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro']
 
 export default function Dashboard({ user }) {
   const [transactions, setTransactions] = useState([])
@@ -68,8 +70,11 @@ export default function Dashboard({ user }) {
   const [editValues, setEditValues] = useState({ type: '', category: '' })
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768)
 
-  const nowKey = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`
-  const [reportMonth, setReportMonth] = useState(nowKey)
+  // Calendário
+  const today = new Date()
+  const [calYear, setCalYear] = useState(today.getFullYear())
+  const [calMonth, setCalMonth] = useState(today.getMonth()) // 0-indexed
+  const [selectedDay, setSelectedDay] = useState(null) // 'YYYY-MM-DD' or null
 
   useEffect(() => {
     const handleResize = () => setIsMobile(window.innerWidth < 768)
@@ -146,6 +151,10 @@ export default function Dashboard({ user }) {
   const handleDelete = async (id) => {
     await supabase.from('transactions').delete().eq('id', id)
     setTransactions(prev => prev.filter(t => t.id !== id))
+    if (selectedDay) {
+      const remaining = transactions.filter(t => t.id !== id && t.date === selectedDay)
+      if (remaining.length === 0) setSelectedDay(null)
+    }
   }
 
   // ── Goals ──────────────────────────────────────────────────────────────────
@@ -188,38 +197,42 @@ export default function Dashboard({ user }) {
     }
   })
 
-  // ── Computed relatório ─────────────────────────────────────────────────────
-  const reportTx = transactions.filter(t => t.date?.startsWith(reportMonth))
-  const reportIncome = reportTx.filter(t => t.type === 'income').reduce((s, t) => s + Number(t.value), 0)
-  const reportExpense = reportTx.filter(t => t.type === 'expense').reduce((s, t) => s + Number(t.value), 0)
-  const reportBalance = reportIncome - reportExpense
-  const reportSaving = reportIncome > 0 ? ((reportBalance / reportIncome) * 100).toFixed(1) : 0
+  // ── Calendário ─────────────────────────────────────────────────────────────
+  const calMonthKey = `${calYear}-${String(calMonth + 1).padStart(2, '0')}`
+  const firstDay = new Date(calYear, calMonth, 1).getDay() // 0=Dom
+  const daysInMonth = new Date(calYear, calMonth + 1, 0).getDate()
+  const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
 
-  const reportByCategory = reportTx
-    .filter(t => t.type === 'expense')
-    .reduce((acc, t) => { acc[t.category] = (acc[t.category] || 0) + Number(t.value); return acc }, {})
-  const reportCatData = Object.entries(reportByCategory)
-    .map(([name, value]) => ({ name, value }))
-    .sort((a, b) => b.value - a.value)
+  // Map day -> transactions
+  const calTxMap = {}
+  transactions.forEach(t => {
+    if (t.date?.startsWith(calMonthKey)) {
+      if (!calTxMap[t.date]) calTxMap[t.date] = []
+      calTxMap[t.date].push(t)
+    }
+  })
 
-  const reportGrouped = reportTx.reduce((acc, t) => {
-    if (!acc[t.date]) acc[t.date] = []
-    acc[t.date].push(t)
-    return acc
-  }, {})
-  const reportDays = Object.keys(reportGrouped).sort((a, b) => b.localeCompare(a))
+  const prevCalMonth = () => {
+    if (calMonth === 0) { setCalYear(y => y - 1); setCalMonth(11) }
+    else setCalMonth(m => m - 1)
+    setSelectedDay(null)
+  }
+  const nextCalMonth = () => {
+    if (calMonth === 11) { setCalYear(y => y + 1); setCalMonth(0) }
+    else setCalMonth(m => m + 1)
+    setSelectedDay(null)
+  }
 
-  const availableMonths = [...new Set(transactions.map(t => t.date?.slice(0, 7)))].filter(Boolean).sort((a, b) => b.localeCompare(a))
-  if (!availableMonths.includes(nowKey)) availableMonths.unshift(nowKey)
+  const selectedDayTx = selectedDay ? (calTxMap[selectedDay] || []) : []
 
   // ── Transações agrupadas (aba Transações) ──────────────────────────────────
   const filtered = transactions.filter(t => filterType === 'all' || t.type === filterType)
   const groupedByMonthDay = filtered.reduce((acc, t) => {
-    const monthKey = t.date?.slice(0, 7)
-    const dayKey = t.date
-    if (!acc[monthKey]) acc[monthKey] = {}
-    if (!acc[monthKey][dayKey]) acc[monthKey][dayKey] = []
-    acc[monthKey][dayKey].push(t)
+    const mk = t.date?.slice(0, 7)
+    const dk = t.date
+    if (!acc[mk]) acc[mk] = {}
+    if (!acc[mk][dk]) acc[mk][dk] = []
+    acc[mk][dk].push(t)
     return acc
   }, {})
   const sortedMonths = Object.keys(groupedByMonthDay).sort((a, b) => b.localeCompare(a))
@@ -227,7 +240,6 @@ export default function Dashboard({ user }) {
   const tabs = [
     { id: 'dashboard', label: 'Visão Geral', icon: '◈' },
     { id: 'transactions', label: 'Transações', icon: '⇄' },
-    { id: 'report', label: 'Relatório', icon: '📊' },
     { id: 'goals', label: 'Metas', icon: '◎' },
   ]
 
@@ -235,36 +247,34 @@ export default function Dashboard({ user }) {
     ? <p style={{ color: '#ef4444', fontSize: 12, margin: '4px 0 0', fontWeight: 500 }}>⚠ {msg}</p>
     : null
 
-  // ── Linha de transação (reutilizada em Transações e Relatório) ─────────────
-  const TxRow = ({ t, index, total }) => (
+  const TxRow = ({ t, index, total, compact }) => (
     <div style={{ borderBottom: index < total - 1 ? '1px solid #0d1a2e' : 'none' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: isMobile ? '12px 14px' : '13px 20px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flex: 1, minWidth: 0 }}>
-          <div style={{ width: 38, height: 38, flexShrink: 0, borderRadius: 11, background: (t.type === 'income' ? '#22c55e' : categoryColors[t.category] || '#6b7280') + '20', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: compact ? '10px 14px' : (isMobile ? '12px 14px' : '13px 20px') }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, minWidth: 0 }}>
+          <div style={{ width: 34, height: 34, flexShrink: 0, borderRadius: 10, background: (t.type === 'income' ? '#22c55e' : categoryColors[t.category] || '#6b7280') + '20', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 15 }}>
             {t.type === 'income' ? '↑' : '↓'}
           </div>
           <div style={{ minWidth: 0 }}>
-            <p style={{ margin: 0, fontSize: 14, fontWeight: 600, color: '#e2e8f0', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.description}</p>
-            <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 3, flexWrap: 'wrap' }}>
-              <span style={{ fontSize: 11, padding: '2px 7px', borderRadius: 20, background: (categoryColors[t.category] || '#6b7280') + '25', color: categoryColors[t.category] || '#6b7280', fontWeight: 600, whiteSpace: 'nowrap' }}>{t.category}</span>
-              <button
-                onClick={() => editingId === t.id ? setEditingId(null) : startEdit(t)}
-                style={{ fontSize: 11, padding: '2px 8px', borderRadius: 20, border: '1px solid #1e293b', background: editingId === t.id ? '#38bdf820' : 'transparent', color: editingId === t.id ? '#38bdf8' : '#64748b', cursor: 'pointer', fontWeight: 500, whiteSpace: 'nowrap' }}>
-                ✎ Editar
-              </button>
+            <p style={{ margin: 0, fontSize: 13, fontWeight: 600, color: '#e2e8f0', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.description}</p>
+            <div style={{ display: 'flex', gap: 5, alignItems: 'center', marginTop: 2, flexWrap: 'wrap' }}>
+              <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 20, background: (categoryColors[t.category] || '#6b7280') + '25', color: categoryColors[t.category] || '#6b7280', fontWeight: 600 }}>{t.category}</span>
+              {!compact && (
+                <button onClick={() => editingId === t.id ? setEditingId(null) : startEdit(t)}
+                  style={{ fontSize: 10, padding: '1px 7px', borderRadius: 20, border: '1px solid #1e293b', background: editingId === t.id ? '#38bdf820' : 'transparent', color: editingId === t.id ? '#38bdf8' : '#64748b', cursor: 'pointer' }}>
+                  ✎ Editar
+                </button>
+              )}
             </div>
           </div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0, marginLeft: 8 }}>
-          <span style={{ fontWeight: 700, fontSize: isMobile ? 13 : 15, color: t.type === 'income' ? '#22c55e' : '#f97316', whiteSpace: 'nowrap' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0, marginLeft: 8 }}>
+          <span style={{ fontWeight: 700, fontSize: 13, color: t.type === 'income' ? '#22c55e' : '#f97316', whiteSpace: 'nowrap' }}>
             {t.type === 'income' ? '+' : '-'}{formatCurrency(t.value)}
           </span>
-          <button onClick={() => handleDelete(t.id)} style={{ background: '#ef444415', border: 'none', color: '#ef4444', borderRadius: 7, width: 28, height: 28, cursor: 'pointer', fontSize: 13, flexShrink: 0 }}>✕</button>
+          <button onClick={() => handleDelete(t.id)} style={{ background: '#ef444415', border: 'none', color: '#ef4444', borderRadius: 6, width: 26, height: 26, cursor: 'pointer', fontSize: 12, flexShrink: 0 }}>✕</button>
         </div>
       </div>
-
-      {/* Painel de edição inline */}
-      {editingId === t.id && (
+      {!compact && editingId === t.id && (
         <div style={{ margin: '0 14px 14px', background: '#0d1a2e', borderRadius: 12, padding: '14px 16px', border: '1px solid #1e293b' }}>
           <p style={{ margin: '0 0 10px', fontSize: 12, color: '#64748b', fontWeight: 600 }}>Alterar tipo e categoria</p>
           <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
@@ -291,7 +301,7 @@ export default function Dashboard({ user }) {
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button onClick={() => setEditingId(null)} style={{ flex: 1, padding: '8px', background: 'transparent', border: '1px solid #1e293b', borderRadius: 9, color: '#64748b', cursor: 'pointer', fontSize: 13 }}>Cancelar</button>
-            <button onClick={handleSaveEdit} style={{ flex: 2, padding: '8px', background: 'linear-gradient(135deg, #06b6d4, #3b82f6)', border: 'none', borderRadius: 9, color: '#fff', cursor: 'pointer', fontWeight: 700, fontSize: 13 }}>Salvar alteração</button>
+            <button onClick={handleSaveEdit} style={{ flex: 2, padding: '8px', background: 'linear-gradient(135deg, #06b6d4, #3b82f6)', border: 'none', borderRadius: 9, color: '#fff', cursor: 'pointer', fontWeight: 700, fontSize: 13 }}>Salvar</button>
           </div>
         </div>
       )}
@@ -309,7 +319,7 @@ export default function Dashboard({ user }) {
   return (
     <div style={{ minHeight: '100vh', background: '#060b14', color: '#e2e8f0', fontFamily: "'DM Sans', 'Segoe UI', sans-serif", display: 'flex' }}>
 
-      {/* ── SIDEBAR (desktop) ── */}
+      {/* ── SIDEBAR ── */}
       {!isMobile && (
         <aside style={{ width: sidebarWidth, background: '#080f1e', borderRight: '1px solid #0f1f35', display: 'flex', flexDirection: 'column', padding: '32px 0', position: 'fixed', height: '100vh', zIndex: 100 }}>
           <div style={{ padding: '0 24px 32px' }}>
@@ -359,8 +369,7 @@ export default function Dashboard({ user }) {
               color: activeTab === tab.id ? '#38bdf8' : '#475569',
               cursor: 'pointer', fontSize: 9, fontWeight: activeTab === tab.id ? 700 : 400, padding: '8px 0',
             }}>
-              <span style={{ fontSize: 18 }}>{tab.icon}</span>
-              {tab.label}
+              <span style={{ fontSize: 18 }}>{tab.icon}</span>{tab.label}
             </button>
           ))}
           <button onClick={() => setShowModal(true)} style={{
@@ -396,6 +405,8 @@ export default function Dashboard({ user }) {
                 {new Date().toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' })}
               </p>
             </div>
+
+            {/* Cards */}
             <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: isMobile ? 12 : 18, marginBottom: 24 }}>
               {[
                 { label: 'Saldo Atual', value: formatCurrency(balance), color: balance >= 0 ? '#22c55e' : '#ef4444', sub: 'Disponível' },
@@ -411,6 +422,8 @@ export default function Dashboard({ user }) {
                 </div>
               ))}
             </div>
+
+            {/* Gráfico área */}
             <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1.7fr 1fr', gap: 16, marginBottom: 24 }}>
               <div style={{ background: '#080f1e', border: '1px solid #0f1f35', borderRadius: 16, padding: '20px 16px' }}>
                 <h3 style={{ margin: '0 0 18px', fontSize: 14, fontWeight: 600, color: '#94a3b8' }}>Receitas vs Despesas (6 meses)</h3>
@@ -434,6 +447,7 @@ export default function Dashboard({ user }) {
                   </AreaChart>
                 </ResponsiveContainer>
               </div>
+
               <div style={{ background: '#080f1e', border: '1px solid #0f1f35', borderRadius: 16, padding: '20px 16px' }}>
                 <h3 style={{ margin: '0 0 14px', fontSize: 14, fontWeight: 600, color: '#94a3b8' }}>Despesas por Categoria</h3>
                 {pieData.length > 0 ? (
@@ -460,6 +474,154 @@ export default function Dashboard({ user }) {
                 )}
               </div>
             </div>
+
+            {/* ── CALENDÁRIO ── */}
+            <div style={{ background: '#080f1e', border: '1px solid #0f1f35', borderRadius: 16, padding: isMobile ? '16px 12px' : '22px 24px', marginBottom: 24 }}>
+              {/* Header calendário */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 18 }}>
+                <button onClick={prevCalMonth} style={{ background: '#0d1a2e', border: '1px solid #1e293b', borderRadius: 8, color: '#94a3b8', width: 32, height: 32, cursor: 'pointer', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>‹</button>
+                <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: '#e2e8f0', textTransform: 'capitalize' }}>
+                  {MONTH_NAMES[calMonth]} {calYear}
+                </h3>
+                <button onClick={nextCalMonth} style={{ background: '#0d1a2e', border: '1px solid #1e293b', borderRadius: 8, color: '#94a3b8', width: 32, height: 32, cursor: 'pointer', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>›</button>
+              </div>
+
+              {/* Dias da semana */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: isMobile ? 3 : 5, marginBottom: isMobile ? 3 : 5 }}>
+                {WEEK_DAYS.map(d => (
+                  <div key={d} style={{ textAlign: 'center', fontSize: 11, fontWeight: 700, color: '#334155', padding: '4px 0' }}>{d}</div>
+                ))}
+              </div>
+
+              {/* Grade de dias */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: isMobile ? 3 : 5 }}>
+                {/* Células vazias antes do dia 1 */}
+                {Array.from({ length: firstDay }).map((_, i) => (
+                  <div key={`empty-${i}`} />
+                ))}
+
+                {/* Dias do mês */}
+                {Array.from({ length: daysInMonth }, (_, i) => {
+                  const dayNum = i + 1
+                  const dayStr = `${calYear}-${String(calMonth + 1).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`
+                  const dayTx = calTxMap[dayStr] || []
+                  const hasIncome = dayTx.some(t => t.type === 'income')
+                  const hasExpense = dayTx.some(t => t.type === 'expense')
+                  const isToday = dayStr === todayStr
+                  const isFuture = dayStr > todayStr
+                  const isSelected = dayStr === selectedDay
+                  const hasTx = dayTx.length > 0
+
+                  const dayIncome = dayTx.filter(t => t.type === 'income').reduce((s, t) => s + Number(t.value), 0)
+                  const dayExpense = dayTx.filter(t => t.type === 'expense').reduce((s, t) => s + Number(t.value), 0)
+
+                  return (
+                    <div
+                      key={dayStr}
+                      onClick={() => hasTx ? setSelectedDay(isSelected ? null : dayStr) : null}
+                      style={{
+                        minHeight: isMobile ? 48 : 72,
+                        borderRadius: 10,
+                        border: '1px solid',
+                        borderColor: isSelected ? '#38bdf8' : isToday ? '#3b82f640' : hasTx ? '#1e293b' : '#0f1f35',
+                        background: isSelected ? '#38bdf810' : isToday ? '#3b82f608' : hasTx ? '#0d1a2e' : 'transparent',
+                        padding: isMobile ? '5px 4px' : '8px 7px',
+                        cursor: hasTx ? 'pointer' : 'default',
+                        transition: 'all 0.15s',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 3,
+                        position: 'relative',
+                        opacity: isFuture && !hasTx ? 0.35 : 1,
+                      }}
+                    >
+                      {/* Número do dia */}
+                      <span style={{
+                        fontSize: isMobile ? 11 : 12,
+                        fontWeight: isToday ? 800 : 500,
+                        color: isToday ? '#38bdf8' : isFuture ? '#64748b' : '#94a3b8',
+                        lineHeight: 1,
+                      }}>{dayNum}</span>
+
+                      {/* Indicadores de transação */}
+                      {hasTx && (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 2, flex: 1 }}>
+                          {hasIncome && (
+                            <span style={{
+                              fontSize: isMobile ? 9 : 10,
+                              color: '#22c55e',
+                              fontWeight: 700,
+                              lineHeight: 1.2,
+                              background: '#22c55e12',
+                              borderRadius: 4,
+                              padding: isMobile ? '1px 3px' : '2px 4px',
+                            }}>
+                              +{formatCurrencyShort(dayIncome)}
+                            </span>
+                          )}
+                          {hasExpense && (
+                            <span style={{
+                              fontSize: isMobile ? 9 : 10,
+                              color: isFuture ? '#f9731699' : '#f97316',
+                              fontWeight: 700,
+                              lineHeight: 1.2,
+                              background: isFuture ? '#f9731608' : '#f9731612',
+                              borderRadius: 4,
+                              padding: isMobile ? '1px 3px' : '2px 4px',
+                            }}>
+                              -{formatCurrencyShort(dayExpense)}
+                            </span>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Ponto indicador de futuros */}
+                      {isFuture && hasTx && (
+                        <div style={{ position: 'absolute', top: 5, right: 5, width: 5, height: 5, borderRadius: '50%', background: '#f97316', opacity: 0.7 }} />
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+
+              {/* Legenda */}
+              <div style={{ display: 'flex', gap: 16, marginTop: 14, flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <div style={{ width: 8, height: 8, borderRadius: 2, background: '#22c55e' }} />
+                  <span style={{ fontSize: 11, color: '#475569' }}>Receita</span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <div style={{ width: 8, height: 8, borderRadius: 2, background: '#f97316' }} />
+                  <span style={{ fontSize: 11, color: '#475569' }}>Despesa</span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <div style={{ width: 5, height: 5, borderRadius: '50%', background: '#f97316', opacity: 0.7 }} />
+                  <span style={{ fontSize: 11, color: '#475569' }}>Lançamento futuro</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Detalhe do dia selecionado */}
+            {selectedDay && (
+              <div style={{ background: '#080f1e', border: '1px solid #38bdf830', borderRadius: 16, padding: '18px 0', marginBottom: 24 }}>
+                <div style={{ padding: '0 20px 14px', borderBottom: '1px solid #0f1f35', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div>
+                    <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: '#e2e8f0', textTransform: 'capitalize' }}>
+                      {formatDateLabel(selectedDay)}
+                    </h3>
+                    <p style={{ margin: '3px 0 0', fontSize: 12, color: '#475569' }}>
+                      {selectedDayTx.length} transação{selectedDayTx.length !== 1 ? 'ões' : ''}
+                    </p>
+                  </div>
+                  <button onClick={() => setSelectedDay(null)} style={{ background: 'none', border: 'none', color: '#475569', cursor: 'pointer', fontSize: 18 }}>✕</button>
+                </div>
+                {selectedDayTx.map((t, i) => (
+                  <TxRow key={t.id} t={t} index={i} total={selectedDayTx.length} compact={false} />
+                ))}
+              </div>
+            )}
+
+            {/* Últimas transações */}
             <div style={{ background: '#080f1e', border: '1px solid #0f1f35', borderRadius: 16, padding: '20px 20px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                 <h3 style={{ margin: 0, fontSize: 14, fontWeight: 600, color: '#94a3b8' }}>Últimas Transações</h3>
@@ -522,7 +684,9 @@ export default function Dashboard({ user }) {
               return (
                 <div key={monthKey} style={{ marginBottom: 28 }}>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, paddingBottom: 10, borderBottom: '1px solid #0f1f35' }}>
-                    <h2 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: '#94a3b8', textTransform: 'capitalize' }}>{formatMonthLabel(monthKey)}</h2>
+                    <h2 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: '#94a3b8', textTransform: 'capitalize' }}>
+                      {MONTH_NAMES[parseInt(monthKey.split('-')[1]) - 1]} {monthKey.split('-')[0]}
+                    </h2>
                     <div style={{ display: 'flex', gap: 14 }}>
                       {mIncome > 0 && <span style={{ fontSize: 12, color: '#22c55e', fontWeight: 600 }}>+{formatCurrency(mIncome)}</span>}
                       {mExpense > 0 && <span style={{ fontSize: 12, color: '#f97316', fontWeight: 600 }}>-{formatCurrency(mExpense)}</span>}
@@ -534,7 +698,7 @@ export default function Dashboard({ user }) {
                       <div key={dayKey} style={{ marginBottom: 16 }}>
                         <p style={{ margin: '0 0 8px', fontSize: 12, color: '#475569', fontWeight: 600, textTransform: 'capitalize' }}>{formatDateLabel(dayKey)}</p>
                         <div style={{ background: '#080f1e', border: '1px solid #0f1f35', borderRadius: 14, overflow: 'hidden' }}>
-                          {dayTx.map((t, i) => <TxRow key={t.id} t={t} index={i} total={dayTx.length} />)}
+                          {dayTx.map((t, i) => <TxRow key={t.id} t={t} index={i} total={dayTx.length} compact={false} />)}
                         </div>
                       </div>
                     )
@@ -542,94 +706,6 @@ export default function Dashboard({ user }) {
                 </div>
               )
             })}
-          </div>
-        )}
-
-        {/* ════════ RELATÓRIO ════════ */}
-        {activeTab === 'report' && (
-          <div>
-            <div style={{ display: 'flex', alignItems: isMobile ? 'flex-start' : 'center', justifyContent: 'space-between', flexDirection: isMobile ? 'column' : 'row', gap: 14, marginBottom: 28 }}>
-              <div>
-                <h1 style={{ fontSize: isMobile ? 20 : 26, fontWeight: 700, margin: 0, letterSpacing: '-0.5px' }}>Relatório Mensal</h1>
-                <p style={{ color: '#475569', margin: '4px 0 0', fontSize: 14, textTransform: 'capitalize' }}>{formatMonthLabel(reportMonth)}</p>
-              </div>
-              {/* Seletor de mês */}
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                {availableMonths.slice(0, 6).map(m => (
-                  <button key={m} onClick={() => setReportMonth(m)} style={{
-                    padding: '7px 14px', borderRadius: 9, border: '1px solid',
-                    borderColor: reportMonth === m ? '#38bdf8' : '#0f1f35',
-                    background: reportMonth === m ? '#38bdf815' : 'transparent',
-                    color: reportMonth === m ? '#38bdf8' : '#475569',
-                    cursor: 'pointer', fontSize: 12, fontWeight: 500, textTransform: 'capitalize',
-                  }}>{formatMonthLabel(m)}</button>
-                ))}
-              </div>
-            </div>
-
-            {/* Cards resumo do mês */}
-            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: isMobile ? 12 : 16, marginBottom: 24 }}>
-              {[
-                { label: 'Receitas', value: formatCurrency(reportIncome), color: '#22c55e' },
-                { label: 'Despesas', value: formatCurrency(reportExpense), color: '#f97316' },
-                { label: 'Saldo do Mês', value: formatCurrency(reportBalance), color: reportBalance >= 0 ? '#38bdf8' : '#ef4444' },
-                { label: 'Taxa de Poupança', value: `${reportSaving}%`, color: '#a855f7' },
-              ].map((card, i) => (
-                <div key={i} style={{ background: '#080f1e', border: '1px solid #0f1f35', borderRadius: 14, padding: isMobile ? '14px 16px' : '18px 20px', position: 'relative', overflow: 'hidden' }}>
-                  <div style={{ position: 'absolute', top: -18, right: -18, width: 60, height: 60, background: card.color + '15', borderRadius: '50%' }} />
-                  <p style={{ color: '#475569', fontSize: 12, margin: '0 0 6px', fontWeight: 500 }}>{card.label}</p>
-                  <p style={{ color: card.color, fontSize: isMobile ? 16 : 20, fontWeight: 800, margin: 0, letterSpacing: '-0.5px' }}>{card.value}</p>
-                </div>
-              ))}
-            </div>
-
-            {/* Gráfico de barras por categoria */}
-            {reportCatData.length > 0 && (
-              <div style={{ background: '#080f1e', border: '1px solid #0f1f35', borderRadius: 16, padding: '20px 16px', marginBottom: 24 }}>
-                <h3 style={{ margin: '0 0 16px', fontSize: 14, fontWeight: 600, color: '#94a3b8' }}>Despesas por Categoria</h3>
-                <ResponsiveContainer width="100%" height={Math.max(140, reportCatData.length * 36)}>
-                  <BarChart data={reportCatData} layout="vertical" margin={{ left: 0, right: 20, top: 0, bottom: 0 }}>
-                    <XAxis type="number" tick={{ fill: '#475569', fontSize: 10 }} axisLine={false} tickLine={false} tickFormatter={v => `R$${(v / 1000).toFixed(1)}k`} />
-                    <YAxis type="category" dataKey="name" tick={{ fill: '#94a3b8', fontSize: 12 }} axisLine={false} tickLine={false} width={85} />
-                    <Tooltip formatter={v => formatCurrency(v)} contentStyle={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: 10 }} labelStyle={{ color: '#94a3b8' }} />
-                    <Bar dataKey="value" radius={[0, 6, 6, 0]}>
-                      {reportCatData.map((entry, i) => (
-                        <Cell key={i} fill={categoryColors[entry.name] || '#6b7280'} />
-                      ))}
-                    </Bar>
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            )}
-
-            {/* Lista diária do mês */}
-            {reportDays.length === 0 ? (
-              <div style={{ background: '#080f1e', border: '1px solid #0f1f35', borderRadius: 16, padding: 40, textAlign: 'center', color: '#334155' }}>
-                Nenhuma transação neste mês.
-              </div>
-            ) : (
-              reportDays.map(dayKey => {
-                const dayTx = reportGrouped[dayKey]
-                const dayIncome = dayTx.filter(t => t.type === 'income').reduce((s, t) => s + Number(t.value), 0)
-                const dayExpense = dayTx.filter(t => t.type === 'expense').reduce((s, t) => s + Number(t.value), 0)
-                return (
-                  <div key={dayKey} style={{ marginBottom: 16 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                      <p style={{ margin: 0, fontSize: 12, color: '#475569', fontWeight: 600, textTransform: 'capitalize' }}>
-                        {formatDateLabel(dayKey)}
-                      </p>
-                      <div style={{ display: 'flex', gap: 12 }}>
-                        {dayIncome > 0 && <span style={{ fontSize: 11, color: '#22c55e', fontWeight: 600 }}>+{formatCurrency(dayIncome)}</span>}
-                        {dayExpense > 0 && <span style={{ fontSize: 11, color: '#f97316', fontWeight: 600 }}>-{formatCurrency(dayExpense)}</span>}
-                      </div>
-                    </div>
-                    <div style={{ background: '#080f1e', border: '1px solid #0f1f35', borderRadius: 14, overflow: 'hidden' }}>
-                      {dayTx.map((t, i) => <TxRow key={t.id} t={t} index={i} total={dayTx.length} />)}
-                    </div>
-                  </div>
-                )
-              })
-            )}
           </div>
         )}
 
